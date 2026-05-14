@@ -1,0 +1,18 @@
+# Local build artifacts
+bin/
+*.test
+*.out
+
+# env
+.env
+
+# Editor local settings
+.vscode/settings.json
+
+# Go install archives and extracted SDKs
+go*.linux-amd64.tar.gz
+go/
+
+
+# RoadMap By AI
+roadmap.md

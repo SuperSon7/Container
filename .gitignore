@@ -1,5 +1,6 @@
 # Local build artifacts
 bin/
+mini-container/mini-container
 *.test
 *.out
 
@@ -16,3 +17,9 @@ go/
 
 # RoadMap By AI
 roadmap.md
+
+# RootFS
+rootfs/
+
+# local study file
+study/

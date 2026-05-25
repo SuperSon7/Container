@@ -39,7 +39,9 @@ func run() {
 			syscall.CLONE_NEWNS, //mount_namespace
 	}
 
-	must(cmd.Run())
+	must(cmd.Start())
+	must(applyCgroup(cmd.Process.Pid))
+	must(cmd.Wait())
 }
 
 func child() {
@@ -57,22 +59,23 @@ func child() {
 	must(syscall.Mount("proc", "/proc", "proc", 0, ""))
 	must(syscall.Mount("tmpfs", "/mytemp", "tmpfs", 0, ""))
 
-	cg()
-
 	must(cmd.Run())
 
 	defer must(syscall.Unmount("proc", 0))
 	defer must(syscall.Unmount("mytemp", 0))
 }
 
-func cg() {
-	cgroups := "/sys/fs/cgroup"
-	pids := filepath.Join(cgroups, "pids")
-	os.MkdirAll(filepath.Join(pids, "jb"), 0755)
-	must(os.WriteFile(filepath.Join(pids, "jb/pids.max"), []byte("20"), 0700))
+func applyCgroup(pid int) error {
+
+	cgroupPath := "/sys/fs/cgroup/pids/jb"
+
+	must(os.MkdirAll(cgroupPath, 0755))
+	must(os.WriteFile(filepath.Join(cgroupPath, "pids.max"), []byte("20"), 0700))
 	// Removes the new cgroup in place after the container exits
-	must(os.WriteFile(filepath.Join(pids, "jb/notify_on_release"), []byte("1"), 0700))
-	must(os.WriteFile(filepath.Join(pids, "jb/cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0700))
+	must(os.WriteFile(filepath.Join(cgroupPath, "notify_on_release"), []byte("1"), 0700))
+	must(os.WriteFile(filepath.Join(cgroupPath, "cgroup.procs"), []byte(strconv.Itoa(pid)), 0700))
+
+	return nil
 
 }
 

@@ -56,13 +56,18 @@ func child() {
 	must(syscall.Mount("", "/", "", syscall.MS_PRIVATE|syscall.MS_REC, ""))
 	must(syscall.Chroot("/home/vanillab/container/rootfs")) // must change as your own path
 	must(os.Chdir("/"))
+
 	must(syscall.Mount("proc", "/proc", "proc", 0, ""))
+	defer func() {
+		must(syscall.Unmount("/proc", 0))
+	}()
+
 	must(syscall.Mount("tmpfs", "/mytemp", "tmpfs", 0, ""))
+	defer func() {
+		must(syscall.Unmount("/mytemp", 0))
+	}()
 
 	must(cmd.Run())
-
-	defer must(syscall.Unmount("proc", 0))
-	defer must(syscall.Unmount("mytemp", 0))
 }
 
 func applyCgroup(pid int) error {

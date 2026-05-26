@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strconv"
 	"syscall"
+
+	"mini-container/container/cgroups"
 )
 
 func main() {
@@ -36,11 +36,15 @@ func run() {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: syscall.CLONE_NEWUTS |
 			syscall.CLONE_NEWPID |
-			syscall.CLONE_NEWNS, //mount_namespace
+			syscall.CLONE_NEWNS,
 	}
 
 	must(cmd.Start())
-	must(applyCgroup(cmd.Process.Pid))
+	manager, err := applyCgroup(cmd.Process.Pid)
+	must(err)
+	defer func() {
+		must(manager.Destroy())
+	}()
 	must(cmd.Wait())
 }
 
@@ -70,18 +74,21 @@ func child() {
 	must(cmd.Run())
 }
 
-func applyCgroup(pid int) error {
+func applyCgroup(pid int) (cgroups.Manager, error) {
+	pidsLimit := int64(20)
+	manager, err := cgroups.NewManager("mini-container/jb")
+	if err != nil {
+		return nil, err
+	}
 
-	cgroupPath := "/sys/fs/cgroup/pids/jb"
+	if err := manager.Set(cgroups.ResourceConfig{PidsLimit: &pidsLimit}); err != nil {
+		return nil, err
+	}
+	if err := manager.Apply(pid); err != nil {
+		return nil, err
+	}
 
-	must(os.MkdirAll(cgroupPath, 0755))
-	must(os.WriteFile(filepath.Join(cgroupPath, "pids.max"), []byte("20"), 0700))
-	// Removes the new cgroup in place after the container exits
-	must(os.WriteFile(filepath.Join(cgroupPath, "notify_on_release"), []byte("1"), 0700))
-	must(os.WriteFile(filepath.Join(cgroupPath, "cgroup.procs"), []byte(strconv.Itoa(pid)), 0700))
-
-	return nil
-
+	return manager, nil
 }
 
 func must(err error) {

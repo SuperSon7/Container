@@ -17,6 +17,7 @@ go/
 
 # RoadMap By AI
 roadmap.md
+docs/roadmaps/
 
 # RootFS
 rootfs/

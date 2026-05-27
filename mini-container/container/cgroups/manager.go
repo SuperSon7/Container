@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	"mini-container/container/cgroups/resource"
-	"mini-container/container/cgroups/v1"
-	"mini-container/container/cgroups/v2"
+	v1 "mini-container/container/cgroups/v1"
+	v2 "mini-container/container/cgroups/v2"
 )
 
 const defaultRoot = "/sys/fs/cgroup"
@@ -34,10 +34,15 @@ type Manager interface {
 	Destroy() error
 }
 
+// NewManager creates a manager for the default cgroup mount point.
+// It keeps the common path simple while NewManagerAt allows tests or callers
+// to provide a different cgroup root.
 func NewManager(name string) (Manager, error) {
 	return NewManagerAt(defaultRoot, name)
 }
 
+// NewManagerAt creates a manager rooted at root.
+// name must be a relative cgroup path under root, not an absolute filesystem path.
 func NewManagerAt(root, name string) (Manager, error) {
 	cgroupName, err := cleanName(name)
 	if err != nil {
@@ -59,11 +64,15 @@ func NewManagerAt(root, name string) (Manager, error) {
 	}
 }
 
+// DetectMode detects whether the default cgroup root is v1 or v2.
 func DetectMode() (Mode, error) {
 	return DetectModeAt(defaultRoot)
 }
 
+// DetectModeAt detects the cgroup mode under root instead of binding the logic
+// to the host's /sys/fs/cgroup.
 func DetectModeAt(root string) (Mode, error) {
+	// cgroup v2 exposes cgroup.controllers at the hierarchy root.
 	if fileExists(filepath.Join(root, "cgroup.controllers")) {
 		return ModeV2, nil
 	}

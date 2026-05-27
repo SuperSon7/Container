@@ -13,9 +13,12 @@ import (
 var defaultControllers = []string{"memory", "cpu", "pids"}
 
 type Manager struct {
+	// cgroup v1 exposes a separate hierarchy per controller, so each controller
+	// needs its own cgroup path.
 	paths map[string]string
 }
 
+// NewManager creates a manager for the v1 controller hierarchies mounted under root.
 func NewManager(root, name string) *Manager {
 	paths := make(map[string]string, len(defaultControllers))
 	for _, controller := range defaultControllers {
@@ -93,6 +96,8 @@ func (m *Manager) Destroy() error {
 	return errors.Join(errs...)
 }
 
+// ensure creates the cgroup path for a mounted v1 controller.
+// Unlike v2, there is no cgroup.subtree_control step to delegate controllers.
 func (m *Manager) ensure(controller string) (string, error) {
 	path, ok := m.paths[controller]
 	if !ok {

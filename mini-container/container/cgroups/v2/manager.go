@@ -17,6 +17,8 @@ type Manager struct {
 	path string
 }
 
+// NewManager builds a v2 manager for root/name.
+// The top-level cgroups package passes a cleaned, non-empty relative name here.
 func NewManager(root, name string) *Manager {
 	return &Manager{
 		root: root,
@@ -61,6 +63,8 @@ func (m *Manager) Destroy() error {
 	return os.RemoveAll(m.path)
 }
 
+// ensurePath walks from root to m.path so each parent can delegate the
+// requested controllers before the child cgroup is created.
 func (m *Manager) ensurePath(r resource.Config) error {
 	controllers := neededControllers(r)
 	rel, err := filepath.Rel(m.root, m.path)
@@ -85,6 +89,7 @@ func (m *Manager) ensurePath(r resource.Config) error {
 	return nil
 }
 
+// neededControllers returns only the controllers required by configured limits.
 func neededControllers(r resource.Config) []string {
 	var controllers []string
 	if r.MemoryLimit != 0 {
@@ -100,6 +105,8 @@ func neededControllers(r resource.Config) []string {
 }
 
 func enableControllers(dir string, controllers []string) error {
+	// A child cgroup can use only controllers that are both available in this
+	// cgroup and enabled through cgroup.subtree_control.
 	available, err := readControllerSet(filepath.Join(dir, "cgroup.controllers"))
 	if err != nil {
 		return err
@@ -125,6 +132,7 @@ func enableControllers(dir string, controllers []string) error {
 	return nil
 }
 
+// readControllerSet reads a whitespace-separated cgroup controller list as a set.
 func readControllerSet(path string) (map[string]bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

@@ -6,19 +6,19 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-func CreateBridge(name string, gatewayAddress string) error {
+func SetupBridge(name string, gatewayAddress string) error {
+	// Assign the gateway IP/CIDR to the bridge.
+	addr, err := netlink.ParseAddr(gatewayAddress) // "10.0.0.1/24"
+	if err != nil {
+		return fmt.Errorf("parse bridge gateway address %s: %w", gatewayAddress, err)
+	}
+
 	// Create a host-side bridge device that will act as the container gateway.
 	la := netlink.NewLinkAttrs()
 	la.Name = name
 	br := &netlink.Bridge{LinkAttrs: la}
 	if err := netlink.LinkAdd(br); err != nil {
 		return fmt.Errorf("create bridge %s: %w", name, err)
-	}
-
-	// Assign the gateway IP/CIDR to the bridge.
-	addr, err := netlink.ParseAddr(gatewayAddress) // "10.0.0.1/24"
-	if err != nil {
-		return fmt.Errorf("parse bridge gateway address %s: %w", gatewayAddress, err)
 	}
 
 	// TODO: For multiple containers, keep bridge/gateway setup network-scoped

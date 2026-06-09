@@ -1,4 +1,4 @@
-package network
+package bridge
 
 import (
 	"fmt"

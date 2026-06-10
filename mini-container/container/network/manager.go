@@ -3,7 +3,6 @@ package network
 import (
 	"errors"
 	"fmt"
-	"mini-container/container/network/bridge"
 	"net"
 	"strings"
 )
@@ -20,7 +19,7 @@ type Manager struct {
 func NewManager(config Config) *Manager {
 	return &Manager{
 		config:      config,
-		setupBridge: bridge.SetupBridge,
+		setupBridge: SetupBridge,
 	}
 }
 

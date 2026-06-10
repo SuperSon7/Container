@@ -1,4 +1,4 @@
-package bridge
+package network
 
 import (
 	"fmt"
@@ -6,6 +6,7 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
+// SetupBridge creates the host-side bridge and assigns its gateway address.
 func SetupBridge(name string, gatewayAddress string) error {
 	// Assign the gateway IP/CIDR to the bridge.
 	addr, err := netlink.ParseAddr(gatewayAddress) // "10.0.0.1/24"

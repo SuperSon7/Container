@@ -22,4 +22,7 @@ type Config struct {
 
 	// EnableNAT controls whether container subnet traffic is masqueraded on the host.
 	EnableNAT bool
+
+	// OutboundInterface is the host interface used for NAT when EnableNAT is true.
+	OutboundInterface string
 }

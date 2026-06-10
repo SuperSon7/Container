@@ -121,6 +121,11 @@ func configureContainerInterface(
 			return fmt.Errorf("set container interface %s up: %w", targetName, err)
 		}
 
+		// Bring loopback up for programs that expect 127.0.0.1 inside the container.
+		if err := setLoopbackUp(); err != nil {
+			return err
+		}
+
 		// Install default routing while this thread still observes the container netns.
 		if err := SetupDefaultRoute(RouteConfig{
 			InterfaceName:  targetName,
@@ -131,6 +136,20 @@ func configureContainerInterface(
 
 		return nil
 	})
+}
+
+// setLoopbackUp enables lo inside the current network namespace.
+func setLoopbackUp() error {
+	link, err := netlink.LinkByName("lo")
+	if err != nil {
+		return fmt.Errorf("find loopback interface: %w", err)
+	}
+
+	if err := netlink.LinkSetUp(link); err != nil {
+		return fmt.Errorf("set loopback interface up: %w", err)
+	}
+
+	return nil
 }
 
 // runInNetworkNamespace runs fn while the current OS thread is attached to targetNS.

@@ -14,6 +14,7 @@ func TestNewManagerStoresConfig(t *testing.T) {
 		ContainerAddress:       "10.0.0.2/24",
 		GatewayAddress:         "10.0.0.1/24",
 		EnableNAT:              true,
+		OutboundInterface:      "eth0",
 	}
 
 	manager := NewManager(config)
@@ -48,6 +49,10 @@ func TestManagerSetupSkipsDisabledNetwork(t *testing.T) {
 	}
 	manager.connectContainer = func(bridgeName string, containerPID int, containerAddress string, gatewayAddress string) error {
 		t.Fatal("expected connectContainer not to be called")
+		return nil
+	}
+	manager.setupNAT = func(config NATConfig) error {
+		t.Fatal("expected setupNAT not to be called")
 		return nil
 	}
 
@@ -119,9 +124,10 @@ func TestManagerSetupCallsConnectContainerWithConfig(t *testing.T) {
 	}
 }
 
-func TestManagerSetupReturnsNotImplementedWhenNATEnabled(t *testing.T) {
+func TestManagerSetupCallsNATWithContainerSubnet(t *testing.T) {
 	config := validConfig()
 	config.EnableNAT = true
+	config.OutboundInterface = "eth0"
 	manager := NewManager(config)
 
 	manager.setupBridge = func(name string, gatewayAddress string) error {
@@ -130,10 +136,42 @@ func TestManagerSetupReturnsNotImplementedWhenNATEnabled(t *testing.T) {
 	manager.connectContainer = func(bridgeName string, containerPID int, containerAddress string, gatewayAddress string) error {
 		return nil
 	}
+	manager.setupNAT = func(config NATConfig) error {
+		if config.SourceCIDR != "10.0.0.0/24" {
+			t.Fatalf("expected source CIDR 10.0.0.0/24, got %s", config.SourceCIDR)
+		}
+		if config.OutboundInterface != "eth0" {
+			t.Fatalf("expected outbound interface eth0, got %s", config.OutboundInterface)
+		}
+
+		return nil
+	}
+
+	if err := manager.Setup(1234); err != nil {
+		t.Fatalf("expected nil error for NAT setup, got %v", err)
+	}
+}
+
+func TestManagerSetupReturnsNATError(t *testing.T) {
+	natErr := errors.New("nat setup failed")
+	config := validConfig()
+	config.EnableNAT = true
+	config.OutboundInterface = "eth0"
+	manager := NewManager(config)
+
+	manager.setupBridge = func(name string, gatewayAddress string) error {
+		return nil
+	}
+	manager.connectContainer = func(bridgeName string, containerPID int, containerAddress string, gatewayAddress string) error {
+		return nil
+	}
+	manager.setupNAT = func(config NATConfig) error {
+		return natErr
+	}
 
 	err := manager.Setup(1234)
-	if !errors.Is(err, ErrNotImplemented) {
-		t.Fatalf("expected ErrNotImplemented for NAT setup, got %v", err)
+	if !errors.Is(err, natErr) {
+		t.Fatalf("expected NAT setup error, got %v", err)
 	}
 }
 
@@ -242,6 +280,31 @@ func TestManagerValidateSetupConfigAcceptsRequiredCIDRs(t *testing.T) {
 
 	if err := manager.validateSetupConfig(); err != nil {
 		t.Fatalf("expected nil error, got %v", err)
+	}
+}
+
+func TestManagerValidateSetupConfigRejectsMissingOutboundInterfaceWhenNATEnabled(t *testing.T) {
+	manager := NewManager(Config{
+		Enabled:          true,
+		BridgeName:       "mini0",
+		ContainerAddress: "10.0.0.2/24",
+		GatewayAddress:   "10.0.0.1/24",
+		EnableNAT:        true,
+	})
+
+	if err := manager.validateSetupConfig(); err == nil {
+		t.Fatal("expected error for missing outbound interface")
+	}
+}
+
+func TestContainerSubnetCIDRDerivesNetworkCIDR(t *testing.T) {
+	got, err := containerSubnetCIDR("10.0.0.2/24")
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	if got != "10.0.0.0/24" {
+		t.Fatalf("expected subnet 10.0.0.0/24, got %s", got)
 	}
 }
 

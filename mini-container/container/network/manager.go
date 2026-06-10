@@ -11,11 +11,13 @@ var ErrNotImplemented = errors.New("network: not implemented")
 
 type setupBridgeFunc func(name string, gatewayAddress string) error
 type connectContainerFunc func(bridgeName string, containerPID int, containerAddress string, gatewayAddress string) error
+type setupNATFunc func(config NATConfig) error
 
 type Manager struct {
 	config           Config
 	setupBridge      setupBridgeFunc
 	connectContainer connectContainerFunc
+	setupNAT         setupNATFunc
 }
 
 // NewManager stores the desired network config and wires the real setup helpers.
@@ -24,6 +26,7 @@ func NewManager(config Config) *Manager {
 		config:           config,
 		setupBridge:      SetupBridge,
 		connectContainer: ConnectContainer,
+		setupNAT:         SetupNAT,
 	}
 }
 
@@ -46,8 +49,17 @@ func (m *Manager) Setup(pid int) error {
 	}
 
 	if m.config.EnableNAT {
-		// TODO: Wire SetupNAT once Config knows the host outbound interface.
-		return ErrNotImplemented
+		sourceCIDR, err := containerSubnetCIDR(m.config.ContainerAddress)
+		if err != nil {
+			return err
+		}
+
+		if err := m.setupNAT(NATConfig{
+			SourceCIDR:        sourceCIDR,
+			OutboundInterface: m.config.OutboundInterface,
+		}); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -77,5 +89,20 @@ func (m *Manager) validateSetupConfig() error {
 		return fmt.Errorf("network: invalid container address %q: %w", m.config.ContainerAddress, err)
 	}
 
+	if m.config.EnableNAT && strings.TrimSpace(m.config.OutboundInterface) == "" {
+		return fmt.Errorf("network: outbound interface is required when NAT is enabled")
+	}
+
 	return nil
+}
+
+// containerSubnetCIDR converts a static container IP/CIDR into the subnet NAT should match.
+func containerSubnetCIDR(containerAddress string) (string, error) {
+	ip, ipNet, err := net.ParseCIDR(containerAddress)
+	if err != nil {
+		return "", fmt.Errorf("network: invalid container address %q: %w", containerAddress, err)
+	}
+
+	ipNet.IP = ip.Mask(ipNet.Mask)
+	return ipNet.String(), nil
 }

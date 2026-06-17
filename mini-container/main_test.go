@@ -3,12 +3,15 @@ package main
 import (
 	"errors"
 	"io"
+	"net"
 	"os"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/vishvananda/netlink"
 )
 
 func TestWaitForParentSyncReturnsWhenEnvMissing(t *testing.T) {
@@ -119,6 +122,81 @@ func TestReleaseChildWritesSignalAndClosesPipe(t *testing.T) {
 	if _, err := readPipe.Read(extra[:]); !errors.Is(err, io.EOF) {
 		t.Fatalf("expected pipe close after release, got %v", err)
 	}
+}
+
+func TestHostDefaultOutboundInterfaceUsesDefaultRoute(t *testing.T) {
+	_, nonDefaultDst, err := net.ParseCIDR("192.168.0.0/16")
+	if err != nil {
+		t.Fatal(err)
+	}
+	useRouteList(t, []netlink.Route{
+		{Dst: nonDefaultDst, LinkIndex: 3},
+		{Dst: nil, LinkIndex: 7},
+	}, nil)
+	useLinkByIndex(t, func(index int) (netlink.Link, error) {
+		if index != 7 {
+			t.Fatalf("expected link index 7, got %d", index)
+		}
+
+		attrs := netlink.NewLinkAttrs()
+		attrs.Name = "ens3"
+		return &netlink.Dummy{LinkAttrs: attrs}, nil
+	})
+
+	got, err := hostDefaultOutboundInterface()
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if got != "ens3" {
+		t.Fatalf("expected outbound interface ens3, got %s", got)
+	}
+}
+
+func TestHostDefaultOutboundInterfaceRejectsMissingDefaultRoute(t *testing.T) {
+	_, nonDefaultDst, err := net.ParseCIDR("192.168.0.0/16")
+	if err != nil {
+		t.Fatal(err)
+	}
+	useRouteList(t, []netlink.Route{{Dst: nonDefaultDst, LinkIndex: 3}}, nil)
+	useLinkByIndex(t, func(index int) (netlink.Link, error) {
+		t.Fatalf("expected linkByIndex not to be called, got %d", index)
+		return nil, nil
+	})
+
+	err = nil
+	_, err = hostDefaultOutboundInterface()
+	if err == nil {
+		t.Fatal("expected error for missing default route")
+	}
+}
+
+func useRouteList(t *testing.T, routes []netlink.Route, err error) {
+	t.Helper()
+
+	old := routeList
+	routeList = func(link netlink.Link, family int) ([]netlink.Route, error) {
+		if link != nil {
+			t.Fatalf("expected nil link filter, got %v", link)
+		}
+		if family != netlink.FAMILY_V4 {
+			t.Fatalf("expected IPv4 route family, got %d", family)
+		}
+
+		return routes, err
+	}
+	t.Cleanup(func() {
+		routeList = old
+	})
+}
+
+func useLinkByIndex(t *testing.T, lookup func(index int) (netlink.Link, error)) {
+	t.Helper()
+
+	old := linkByIndex
+	linkByIndex = lookup
+	t.Cleanup(func() {
+		linkByIndex = old
+	})
 }
 
 func duplicateFD(file *os.File) (int, error) {

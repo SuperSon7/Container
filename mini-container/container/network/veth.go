@@ -14,6 +14,8 @@ const defaultContainerInterfaceName = "eth0"
 // ConnectContainer creates a veth pair, attaches the host side to the bridge,
 // moves the peer into the target netns, and configures it as eth0.
 func ConnectContainer(bridgeName string, containerPID int, containerAddress string, gatewayAddress string) error {
+	// TODO: Allocate interface names from runtime network state when multiple
+	// containers and configurable network attachments are supported.
 	hostVethName := fmt.Sprintf("veth-%d", containerPID)
 	containerVethName := fmt.Sprintf("vethc-%d", containerPID)
 

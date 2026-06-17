@@ -7,12 +7,6 @@ type Config struct {
 	// BridgeName is the bridge device created in the host network namespace.
 	BridgeName string
 
-	// HostInterfaceName is the veth endpoint kept in the host network namespace.
-	HostInterfaceName string
-
-	// ContainerInterfaceName is the veth endpoint moved into the container network namespace.
-	ContainerInterfaceName string
-
 	// ContainerAddress is the IP/CIDR assigned to the container-side interface.
 	ContainerAddress string
 

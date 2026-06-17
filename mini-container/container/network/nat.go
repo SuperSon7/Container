@@ -1,6 +1,7 @@
 package network
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,6 +9,13 @@ import (
 )
 
 var ipv4ForwardingPath = "/proc/sys/net/ipv4/ip_forward"
+var (
+	// runIPTables is replaceable in tests so unit tests never mutate host iptables.
+	runIPTables = runIPTablesCommand
+
+	// checkNATRule is replaceable in tests to drive existing/missing rule paths.
+	checkNATRule = natRuleExists
+)
 
 type NATConfig struct {
 	// SourceCIDR is the container subnet that should be masqueraded.
@@ -25,30 +33,68 @@ func SetupNAT(config NATConfig) error {
 		return err
 	}
 
-	cmd := exec.Command(
-		"iptables",
-		"-t", "nat",
-		"-A", "POSTROUTING",
-		"-s", config.SourceCIDR,
-		"-o", config.OutboundInterface,
-		"-j", "MASQUERADE",
-	)
+	exists, err := checkNATRule(config)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
 
-	return cmd.Run()
+	return runIPTables(natRuleArgs("-A", config)...)
 }
 
 // DestroyNAT removes host-side NAT state created by SetupNAT.
 func DestroyNAT(config NATConfig) error {
-	cmd := exec.Command(
-		"iptables",
+	exists, err := checkNATRule(config)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+
+	return runIPTables(natRuleArgs("-D", config)...)
+}
+
+func natRuleExists(config NATConfig) (bool, error) {
+	err := runIPTables(natRuleArgs("-C", config)...)
+	if err == nil {
+		return true, nil
+	}
+
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+
+	return false, err
+}
+
+func natRuleArgs(action string, config NATConfig) []string {
+	return []string{
 		"-t", "nat",
-		"-D", "POSTROUTING",
+		action, "POSTROUTING",
 		"-s", config.SourceCIDR,
 		"-o", config.OutboundInterface,
 		"-j", "MASQUERADE",
-	)
+	}
+}
 
-	return cmd.Run()
+// runIPTablesCommand keeps iptables stderr/stdout attached to the returned error.
+func runIPTablesCommand(args ...string) error {
+	cmd := exec.Command("iptables", args...)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+
+	details := strings.TrimSpace(string(output))
+	if details == "" {
+		return fmt.Errorf("iptables %s: %w", strings.Join(args, " "), err)
+	}
+
+	return fmt.Errorf("iptables %s: %w: %s", strings.Join(args, " "), err, details)
 }
 
 func enableIPv4Forwarding() error {

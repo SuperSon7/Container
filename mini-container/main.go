@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"strconv"
@@ -191,7 +192,7 @@ func hostDefaultOutboundInterface() (string, error) {
 	}
 
 	for _, route := range routes {
-		if route.Dst != nil {
+		if !isDefaultIPv4Route(route) {
 			continue
 		}
 
@@ -207,6 +208,16 @@ func hostDefaultOutboundInterface() (string, error) {
 	}
 
 	return "", fmt.Errorf("network: default outbound interface not found")
+}
+
+// isDefaultIPv4Route accepts both netlink encodings seen for an IPv4 default route.
+func isDefaultIPv4Route(route netlink.Route) bool {
+	if route.Dst == nil {
+		return true
+	}
+
+	ones, bits := route.Dst.Mask.Size()
+	return bits == 32 && ones == 0 && route.Dst.IP.Equal(net.IPv4zero)
 }
 
 // waitForParentSync blocks the child until the parent finishes cgroup/network setup.

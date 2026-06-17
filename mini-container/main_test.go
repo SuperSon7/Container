@@ -152,6 +152,31 @@ func TestHostDefaultOutboundInterfaceUsesDefaultRoute(t *testing.T) {
 	}
 }
 
+func TestHostDefaultOutboundInterfaceAcceptsZeroCIDRDefaultRoute(t *testing.T) {
+	_, defaultDst, err := net.ParseCIDR("0.0.0.0/0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	useRouteList(t, []netlink.Route{{Dst: defaultDst, LinkIndex: 2}}, nil)
+	useLinkByIndex(t, func(index int) (netlink.Link, error) {
+		if index != 2 {
+			t.Fatalf("expected link index 2, got %d", index)
+		}
+
+		attrs := netlink.NewLinkAttrs()
+		attrs.Name = "eth0"
+		return &netlink.Dummy{LinkAttrs: attrs}, nil
+	})
+
+	got, err := hostDefaultOutboundInterface()
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if got != "eth0" {
+		t.Fatalf("expected outbound interface eth0, got %s", got)
+	}
+}
+
 func TestHostDefaultOutboundInterfaceRejectsMissingDefaultRoute(t *testing.T) {
 	_, nonDefaultDst, err := net.ParseCIDR("192.168.0.0/16")
 	if err != nil {

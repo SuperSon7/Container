@@ -17,11 +17,11 @@ const (
 )
 
 type Manager interface {
-	// Apply creates the cgroup if needed and moves pid into it.
-	Apply(pid int) error
-
 	// Set writes resource limits to the cgroup.
 	Set(r ResourceConfig) error
+
+	// Apply creates the cgroup if needed and moves pid into it.
+	Apply(pid int) error
 
 	// Destroy removes the cgroup directories managed by this manager.
 	Destroy() error

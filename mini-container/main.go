@@ -2,13 +2,34 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"syscall"
 
 	"mini-container/container/cgroups"
+	"mini-container/container/network"
+
+	"github.com/vishvananda/netlink"
 )
 
+const (
+	// ExtraFiles start at fd 3 in the child because 0, 1, and 2 are stdio.
+	childSyncFD  = 3
+	childSyncEnv = "MINI_CONTAINER_CHILD_SYNC_FD"
+)
+
+var (
+	// routeList is replaceable in tests so default-route detection does not depend on the host.
+	routeList = netlink.RouteList
+
+	// linkByIndex is replaceable in tests alongside routeList.
+	linkByIndex = netlink.LinkByIndex
+)
+
+// main dispatches the parent runtime path and the re-executed child bootstrap path.
 func main() {
 	if len(os.Args) < 3 {
 		fmt.Println("usage: mini-container run <command> [args...]")
@@ -25,31 +46,80 @@ func main() {
 	}
 }
 
+// run starts the container bootstrap process, configures host-owned resources,
+// then releases the child so it can finish setup and exec the requested command.
 func run() {
 	fmt.Printf("Running %v \n", os.Args[2:])
+
+	// The child blocks on this pipe before touching its container setup.
+	// That gives the parent time to configure the child's new network namespace.
+	childSyncRead, childSyncWrite, err := os.Pipe()
+	must(err)
 
 	cmd := exec.Command("/proc/self/exe", append([]string{"child"}, os.Args[2:]...)...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	// ExtraFiles passes the read side into the child as fd 3.
+	cmd.ExtraFiles = []*os.File{childSyncRead}
+	cmd.Env = append(os.Environ(), fmt.Sprintf("%s=%d", childSyncEnv, childSyncFD))
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
+		// CLONE_NEWNET creates an empty network namespace for the child.
+		// The child must stay blocked until the parent attaches eth0 and routes.
 		Cloneflags: syscall.CLONE_NEWUTS |
 			syscall.CLONE_NEWPID |
-			syscall.CLONE_NEWNS,
+			syscall.CLONE_NEWNS |
+			syscall.CLONE_NEWNET,
 	}
 
-	must(cmd.Start())
-	manager, err := applyCgroup(cmd.Process.Pid)
-	must(err)
+	if err := cmd.Start(); err != nil {
+		_ = childSyncRead.Close()
+		_ = childSyncWrite.Close()
+		must(err)
+	}
+	// The parent only writes the release signal; keeping this read end open
+	// would hide pipe-close failures from the child.
+	must(childSyncRead.Close())
+
+	cgroupManager, err := applyCgroup(cmd.Process.Pid)
+	if err != nil {
+		abortChild(cmd, childSyncWrite)
+		must(err)
+	}
+
+	networkManager, err := newNetworkManager()
+	if err != nil {
+		_ = cgroupManager.Destroy()
+		abortChild(cmd, childSyncWrite)
+		must(err)
+	}
+	if err := networkManager.Setup(cmd.Process.Pid); err != nil {
+		_ = networkManager.Destroy()
+		_ = cgroupManager.Destroy()
+		abortChild(cmd, childSyncWrite)
+		must(err)
+	}
+
+	if err := releaseChild(childSyncWrite); err != nil {
+		_ = networkManager.Destroy()
+		_ = cgroupManager.Destroy()
+		abortChild(cmd, nil)
+		must(err)
+	}
 
 	// Wait reports non-zero container exits as errors; translate them after cleanup.
 	waitErr := cmd.Wait()
-	must(manager.Destroy())
+	must(networkManager.Destroy())
+	must(cgroupManager.Destroy())
 	exitWithChildStatus(waitErr)
 }
 
+// child waits for parent-side setup, then builds the container view and execs the command.
 func child() {
+	must(waitForParentSync())
+	must(os.Unsetenv(childSyncEnv))
+
 	fmt.Printf("Running %v \n", os.Args[2:])
 
 	must(syscall.Sethostname([]byte("container")))
@@ -77,24 +147,135 @@ func child() {
 	must(syscall.Exec(command, os.Args[2:], os.Environ()))
 }
 
+// applyCgroup attaches the container process to the pids-limited cgroup.
 func applyCgroup(pid int) (cgroups.Manager, error) {
 	// TODO: move cgroup name and resource limits into runtime config.
 	pidsLimit := int64(20)
-	manager, err := cgroups.NewManager("mini-container/jb")
+	cgroupManager, err := cgroups.NewManager("mini-container/jb")
 	if err != nil {
 		return nil, err
 	}
 
-	if err := manager.Set(cgroups.ResourceConfig{PidsLimit: &pidsLimit}); err != nil {
+	if err := cgroupManager.Set(cgroups.ResourceConfig{PidsLimit: &pidsLimit}); err != nil {
 		return nil, err
 	}
-	if err := manager.Apply(pid); err != nil {
+	if err := cgroupManager.Apply(pid); err != nil {
 		return nil, err
 	}
 
-	return manager, nil
+	return cgroupManager, nil
 }
 
+// newNetworkManager returns the static bridge network used by this prototype runtime.
+func newNetworkManager() (*network.Manager, error) {
+	outboundInterface, err := hostDefaultOutboundInterface()
+	if err != nil {
+		return nil, err
+	}
+
+	// TODO: move network settings into runtime config.
+	return network.NewManager(network.Config{
+		Enabled:           true,
+		BridgeName:        "mini0",
+		ContainerAddress:  "10.0.0.2/24",
+		GatewayAddress:    "10.0.0.1/24",
+		EnableNAT:         true,
+		OutboundInterface: outboundInterface,
+	}), nil
+}
+
+// hostDefaultOutboundInterface finds the host interface used by the default IPv4 route.
+func hostDefaultOutboundInterface() (string, error) {
+	routes, err := routeList(nil, netlink.FAMILY_V4)
+	if err != nil {
+		return "", fmt.Errorf("list host IPv4 routes: %w", err)
+	}
+
+	for _, route := range routes {
+		if !isDefaultIPv4Route(route) {
+			continue
+		}
+
+		link, err := linkByIndex(route.LinkIndex)
+		if err != nil {
+			return "", fmt.Errorf("find default route link %d: %w", route.LinkIndex, err)
+		}
+		if link.Attrs().Name == "" {
+			return "", fmt.Errorf("network: default route link %d has empty name", route.LinkIndex)
+		}
+
+		return link.Attrs().Name, nil
+	}
+
+	return "", fmt.Errorf("network: default outbound interface not found")
+}
+
+// isDefaultIPv4Route accepts both netlink encodings seen for an IPv4 default route.
+func isDefaultIPv4Route(route netlink.Route) bool {
+	if route.Dst == nil {
+		return true
+	}
+
+	ones, bits := route.Dst.Mask.Size()
+	return bits == 32 && ones == 0 && route.Dst.IP.Equal(net.IPv4zero)
+}
+
+// waitForParentSync blocks the child until the parent finishes cgroup/network setup.
+func waitForParentSync() error {
+	fdValue := os.Getenv(childSyncEnv)
+	if fdValue == "" {
+		return nil
+	}
+
+	fd, err := strconv.Atoi(fdValue)
+	if err != nil {
+		return fmt.Errorf("parse child sync fd %q: %w", fdValue, err)
+	}
+
+	file := os.NewFile(uintptr(fd), "child-sync")
+	if file == nil {
+		return fmt.Errorf("open child sync fd %d", fd)
+	}
+	defer file.Close()
+
+	var buf [1]byte
+	// ReadFull keeps the child stopped until the parent writes the release byte.
+	if _, err := io.ReadFull(file, buf[:]); err != nil {
+		return fmt.Errorf("wait for parent setup: %w", err)
+	}
+
+	return nil
+}
+
+// releaseChild sends the one-byte signal that lets the child continue.
+func releaseChild(syncWrite *os.File) error {
+	_, writeErr := syncWrite.Write([]byte{1})
+	closeErr := syncWrite.Close()
+
+	if writeErr != nil {
+		return fmt.Errorf("release child: %w", writeErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close child sync pipe: %w", closeErr)
+	}
+
+	return nil
+}
+
+// abortChild closes the optional sync pipe, kills the blocked child, and reaps it.
+func abortChild(cmd *exec.Cmd, syncWrite *os.File) {
+	if syncWrite != nil {
+		_ = syncWrite.Close()
+	}
+	if cmd.Process == nil {
+		return
+	}
+
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+}
+
+// must keeps the prototype runtime path compact by panicking on unexpected setup errors.
 func must(err error) {
 	if err != nil {
 		panic(err)

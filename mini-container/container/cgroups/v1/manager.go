@@ -31,20 +31,6 @@ func NewManager(root, name string) *Manager {
 	return &Manager{paths: paths}
 }
 
-func (m *Manager) Apply(pid int) error {
-	var errs []error
-	for _, path := range m.paths {
-		if err := os.MkdirAll(path, 0o755); err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		if err := writeFile(path, "cgroup.procs", strconv.Itoa(pid)); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	return errors.Join(errs...)
-}
-
 func (m *Manager) Set(r resource.Config) error {
 	if r.MemoryLimit != 0 {
 		path, err := m.ensure("memory")
@@ -84,6 +70,20 @@ func (m *Manager) Set(r resource.Config) error {
 	}
 
 	return nil
+}
+
+func (m *Manager) Apply(pid int) error {
+	var errs []error
+	for _, path := range m.paths {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if err := writeFile(path, "cgroup.procs", strconv.Itoa(pid)); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (m *Manager) Destroy() error {

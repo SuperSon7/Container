@@ -26,13 +26,6 @@ func NewManager(root, name string) *Manager {
 	}
 }
 
-func (m *Manager) Apply(pid int) error {
-	if err := os.MkdirAll(m.path, 0o755); err != nil {
-		return err
-	}
-	return writeFile(m.path, "cgroup.procs", strconv.Itoa(pid))
-}
-
 func (m *Manager) Set(r resource.Config) error {
 	if err := m.ensurePath(r); err != nil {
 		return err
@@ -57,6 +50,13 @@ func (m *Manager) Set(r resource.Config) error {
 	}
 
 	return nil
+}
+
+func (m *Manager) Apply(pid int) error {
+	if err := os.MkdirAll(m.path, 0o755); err != nil {
+		return err
+	}
+	return writeFile(m.path, "cgroup.procs", strconv.Itoa(pid))
 }
 
 func (m *Manager) Destroy() error {

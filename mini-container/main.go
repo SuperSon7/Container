@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
@@ -49,6 +51,8 @@ func main() {
 // run starts the container bootstrap process, configures host-owned resources,
 // then releases the child so it can finish setup and exec the requested command.
 func run() {
+	id, err := newContainerID()
+	must(err)
 	fmt.Printf("Running %v \n", os.Args[2:])
 
 	// The child blocks on this pipe before touching its container setup.
@@ -82,7 +86,7 @@ func run() {
 	// would hide pipe-close failures from the child.
 	must(childSyncRead.Close())
 
-	cgroupManager, err := applyCgroup(cmd.Process.Pid)
+	cgroupManager, err := applyCgroup(id, cmd.Process.Pid)
 	if err != nil {
 		abortChild(cmd, childSyncWrite)
 		must(err)
@@ -94,15 +98,15 @@ func run() {
 		abortChild(cmd, childSyncWrite)
 		must(err)
 	}
-	if err := networkManager.Setup(cmd.Process.Pid); err != nil {
-		_ = networkManager.Destroy()
+	if _, err := networkManager.Attach(id, cmd.Process.Pid); err != nil {
+		_ = networkManager.Detach(id)
 		_ = cgroupManager.Destroy()
 		abortChild(cmd, childSyncWrite)
 		must(err)
 	}
 
 	if err := releaseChild(childSyncWrite); err != nil {
-		_ = networkManager.Destroy()
+		_ = networkManager.Detach(id)
 		_ = cgroupManager.Destroy()
 		abortChild(cmd, nil)
 		must(err)
@@ -110,7 +114,7 @@ func run() {
 
 	// Wait reports non-zero container exits as errors; translate them after cleanup.
 	waitErr := cmd.Wait()
-	must(networkManager.Destroy())
+	must(networkManager.Detach(id))
 	must(cgroupManager.Destroy())
 	exitWithChildStatus(waitErr)
 }
@@ -148,10 +152,10 @@ func child() {
 }
 
 // applyCgroup attaches the container process to the pids-limited cgroup.
-func applyCgroup(pid int) (cgroups.Manager, error) {
-	// TODO: move cgroup name and resource limits into runtime config.
+func applyCgroup(id string, pid int) (cgroups.Manager, error) {
+	// TODO: move resource limits into runtime config.
 	pidsLimit := int64(20)
-	cgroupManager, err := cgroups.NewManager("mini-container/jb")
+	cgroupManager, err := cgroups.NewManager("mini-container/" + id)
 	if err != nil {
 		return nil, err
 	}
@@ -177,11 +181,10 @@ func newNetworkManager() (*network.Manager, error) {
 	return network.NewManager(network.Config{
 		Enabled:           true,
 		BridgeName:        "mini0",
-		ContainerAddress:  "10.0.0.2/24",
 		GatewayAddress:    "10.0.0.1/24",
 		EnableNAT:         true,
 		OutboundInterface: outboundInterface,
-	}), nil
+	})
 }
 
 // hostDefaultOutboundInterface finds the host interface used by the default IPv4 route.
@@ -302,4 +305,12 @@ func exitWithChildStatus(err error) {
 	}
 
 	must(err)
+}
+
+func newContainerID() (string, error) {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(id[:]), nil
 }

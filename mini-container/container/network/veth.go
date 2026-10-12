@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"syscall"
 
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
@@ -13,7 +14,8 @@ const defaultContainerInterfaceName = "eth0"
 
 // ConnectContainer creates a veth pair, attaches the host side to the bridge,
 // moves the peer into the target netns, and configures it as eth0.
-func ConnectContainer(bridgeName string, containerPID int, containerAddress string, gatewayAddress string) error {
+// The caller must run a non-nil cleanup action even when setup returns an error.
+func ConnectContainer(bridgeName string, containerPID int, containerAddress string, gatewayAddress string) (cleanup func() error, err error) {
 	// TODO: Allocate interface names from runtime network state when multiple
 	// containers and configurable network attachments are supported.
 	hostVethName := fmt.Sprintf("veth-%d", containerPID)
@@ -22,18 +24,18 @@ func ConnectContainer(bridgeName string, containerPID int, containerAddress stri
 	// Hold a target netns fd before moving the peer so this setup has a stable handle.
 	targetNS, err := netns.GetFromPid(containerPID)
 	if err != nil {
-		return fmt.Errorf("get netns for pid %d: %w", containerPID, err)
+		return cleanup, fmt.Errorf("get netns for pid %d: %w", containerPID, err)
 	}
 	defer targetNS.Close()
 
 	// Refuse to configure the current host netns; the child must be created with CLONE_NEWNET.
 	currentNS, err := netns.Get()
 	if err != nil {
-		return fmt.Errorf("get current netns: %w", err)
+		return cleanup, fmt.Errorf("get current netns: %w", err)
 	}
 	defer currentNS.Close()
 	if currentNS.Equal(targetNS) {
-		return fmt.Errorf("network: pid %d is in the current netns; CLONE_NEWNET is required", containerPID)
+		return cleanup, fmt.Errorf("network: pid %d is in the current netns; CLONE_NEWNET is required", containerPID)
 	}
 
 	// Create the veth pair in the host netns first; one side will be moved later.
@@ -41,39 +43,47 @@ func ConnectContainer(bridgeName string, containerPID int, containerAddress stri
 	la.Name = hostVethName
 	veth := &netlink.Veth{LinkAttrs: la, PeerName: containerVethName}
 	if err := netlink.LinkAdd(veth); err != nil {
-		return fmt.Errorf("create veth pair %s/%s: %w", hostVethName, containerVethName, err)
+		return cleanup, fmt.Errorf("create veth pair %s/%s: %w", hostVethName, containerVethName, err)
+	}
+	// Return the same cleanup action for partial failure and normal teardown.
+	// Only a successful LinkAdd grants ownership of this pair.
+	cleanup = func() error {
+		if err := netlink.LinkDel(veth); err != nil && !errors.Is(err, syscall.ENODEV) {
+			return fmt.Errorf("delete veth pair %s/%s: %w", hostVethName, containerVethName, err)
+		}
+		return nil
 	}
 
 	// Attach the host-side veth to the host bridge so it can reach the gateway.
 	br, err := netlink.LinkByName(bridgeName)
 	if err != nil {
-		return fmt.Errorf("find bridge %s: %w", bridgeName, err)
+		return cleanup, fmt.Errorf("find bridge %s: %w", bridgeName, err)
 	}
 
 	hostVeth, err := netlink.LinkByName(hostVethName)
 	if err != nil {
-		return fmt.Errorf("find host veth %s: %w", hostVethName, err)
+		return cleanup, fmt.Errorf("find host veth %s: %w", hostVethName, err)
 	}
 
 	if err := netlink.LinkSetMaster(hostVeth, br); err != nil {
-		return fmt.Errorf("attach host veth %s to bridge %s: %w", hostVethName, bridgeName, err)
+		return cleanup, fmt.Errorf("attach host veth %s to bridge %s: %w", hostVethName, bridgeName, err)
 	}
 
 	if err := netlink.LinkSetUp(hostVeth); err != nil {
-		return fmt.Errorf("set host veth %s up: %w", hostVethName, err)
+		return cleanup, fmt.Errorf("set host veth %s up: %w", hostVethName, err)
 	}
 
 	// Move the container-side veth into the target network namespace.
 	containerVeth, err := netlink.LinkByName(containerVethName)
 	if err != nil {
-		return fmt.Errorf("find container veth %s: %w", containerVethName, err)
+		return cleanup, fmt.Errorf("find container veth %s: %w", containerVethName, err)
 	}
 
 	if err := netlink.LinkSetNsPid(containerVeth, containerPID); err != nil {
-		return fmt.Errorf("move container veth %s to netns of pid %d: %w", containerVethName, containerPID, err)
+		return cleanup, fmt.Errorf("move container veth %s to netns of pid %d: %w", containerVethName, containerPID, err)
 	}
 
-	return configureContainerInterface(
+	return cleanup, configureContainerInterface(
 		targetNS,
 		containerVethName,
 		defaultContainerInterfaceName,
@@ -109,7 +119,7 @@ func configureContainerInterface(
 			return fmt.Errorf("find container interface %s: %w", targetName, err)
 		}
 
-		// Assign the static container IP/CIDR; IPAM can replace this later.
+		// Assign the address supplied by IPAM.
 		addr, err := netlink.ParseAddr(containerAddress)
 		if err != nil {
 			return fmt.Errorf("parse container address %s: %w", containerAddress, err)
@@ -154,29 +164,32 @@ func setLoopbackUp() error {
 	return nil
 }
 
-// runInNetworkNamespace runs fn while the current OS thread is attached to targetNS.
-func runInNetworkNamespace(targetNS netns.NsHandle, fn func() error) (err error) {
-	// setns changes namespace membership for one OS thread, so pin this goroutine first.
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-
-	// Save the original netns so the thread can be restored before returning.
-	currentNS, err := netns.Get()
-	if err != nil {
-		return fmt.Errorf("get current netns: %w", err)
-	}
-	defer currentNS.Close()
-
-	// From this point, netlink calls on this thread observe targetNS network state.
-	if err := netns.Set(targetNS); err != nil {
-		return fmt.Errorf("enter target netns: %w", err)
-	}
-	defer func() {
-		// Always try to put the thread back, even when fn fails.
-		if restoreErr := netns.Set(currentNS); restoreErr != nil {
-			err = errors.Join(err, fmt.Errorf("restore original netns: %w", restoreErr))
+// runInNetworkNamespace confines setns to a dedicated goroutine. If restoring
+// the host namespace fails, Go retires the locked thread instead of reusing it
+// for another daemon request in the wrong namespace.
+func runInNetworkNamespace(targetNS netns.NsHandle, fn func() error) error {
+	done := make(chan error, 1)
+	go func() {
+		runtime.LockOSThread()
+		currentNS, err := netns.Get()
+		if err != nil {
+			runtime.UnlockOSThread()
+			done <- fmt.Errorf("get current netns: %w", err)
+			return
 		}
+		defer currentNS.Close()
+		if err := netns.Set(targetNS); err != nil {
+			runtime.UnlockOSThread()
+			done <- fmt.Errorf("enter target netns: %w", err)
+			return
+		}
+		err = fn()
+		if restoreErr := netns.Set(currentNS); restoreErr != nil {
+			done <- errors.Join(err, fmt.Errorf("restore original netns: %w", restoreErr))
+			return
+		}
+		runtime.UnlockOSThread()
+		done <- err
 	}()
-
-	return fn()
+	return <-done
 }

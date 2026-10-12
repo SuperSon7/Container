@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -29,90 +30,75 @@ var (
 	linkByIndex = netlink.LinkByIndex
 )
 
-// main dispatches the parent runtime path and the re-executed child bootstrap path.
+// main dispatches the daemon, CLI client and re-executed child bootstrap.
 func main() {
-	if len(os.Args) < 3 {
-		fmt.Println("usage: mini-container run <command> [args...]")
+	if len(os.Args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: mini-container daemon --rootfs <path> | run <command> [args...] | start/stop/rm <id> | ps | network-rm")
 		os.Exit(1)
 	}
-
-	switch os.Args[1] {
-	case "run":
-		run()
-	case "child":
+	if os.Args[1] == "child" {
+		if len(os.Args) < 4 {
+			fmt.Fprintln(os.Stderr, "child requires rootfs and command")
+			os.Exit(1)
+		}
 		child()
-	default:
-		fmt.Println("unknown command:", os.Args[1])
+		return
 	}
+	var code int
+	var err error
+	if os.Args[1] == "daemon" {
+		err = serveDaemon(os.Args[2:])
+	} else {
+		code, err = runClient(os.Args[1:])
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Exit(code)
 }
 
-// run starts the container bootstrap process, configures host-owned resources,
-// then releases the child so it can finish setup and exec the requested command.
-func run() {
-	fmt.Printf("Running %v \n", os.Args[2:])
-
-	// The child blocks on this pipe before touching its container setup.
-	// That gives the parent time to configure the child's new network namespace.
+// startContainer leaves the bootstrap blocked until cgroup and networking are ready.
+// The daemon owns the process and calls cleanup only after it has been reaped.
+func startContainer(id, rootfs string, args []string, stdio []*os.File, networks *network.Manager) (*exec.Cmd, func() error, error) {
 	childSyncRead, childSyncWrite, err := os.Pipe()
-	must(err)
-
-	cmd := exec.Command("/proc/self/exe", append([]string{"child"}, os.Args[2:]...)...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	// ExtraFiles passes the read side into the child as fd 3.
+	if err != nil {
+		return nil, nil, err
+	}
+	defer childSyncRead.Close()
+	defer childSyncWrite.Close()
+	cmd := exec.Command("/proc/self/exe", append([]string{"child", rootfs}, args...)...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdio[0], stdio[1], stdio[2]
 	cmd.ExtraFiles = []*os.File{childSyncRead}
 	cmd.Env = append(os.Environ(), fmt.Sprintf("%s=%d", childSyncEnv, childSyncFD))
-
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		// CLONE_NEWNET creates an empty network namespace for the child.
-		// The child must stay blocked until the parent attaches eth0 and routes.
-		Cloneflags: syscall.CLONE_NEWUTS |
-			syscall.CLONE_NEWPID |
-			syscall.CLONE_NEWNS |
-			syscall.CLONE_NEWNET,
+		Cloneflags: syscall.CLONE_NEWUTS | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWNET,
+		Pdeathsig:  syscall.SIGKILL,
 	}
-
 	if err := cmd.Start(); err != nil {
-		_ = childSyncRead.Close()
-		_ = childSyncWrite.Close()
-		must(err)
+		return nil, nil, err
 	}
-	// The parent only writes the release signal; keeping this read end open
-	// would hide pipe-close failures from the child.
-	must(childSyncRead.Close())
-
-	cgroupManager, err := applyCgroup(cmd.Process.Pid)
+	var cgroupManager cgroups.Manager
+	cleanup := func() error {
+		networkErr := networks.Detach(id)
+		var cgroupErr error
+		if cgroupManager != nil {
+			cgroupErr = cgroupManager.Destroy()
+		}
+		return errors.Join(networkErr, cgroupErr)
+	}
+	cgroupManager, err = applyCgroup(id, cmd.Process.Pid)
+	if err == nil {
+		_, err = networks.Attach(id, cmd.Process.Pid)
+	}
+	if err == nil {
+		err = releaseChild(childSyncWrite)
+	}
 	if err != nil {
 		abortChild(cmd, childSyncWrite)
-		must(err)
+		return nil, cleanup, err
 	}
-
-	networkManager, err := newNetworkManager()
-	if err != nil {
-		_ = cgroupManager.Destroy()
-		abortChild(cmd, childSyncWrite)
-		must(err)
-	}
-	if err := networkManager.Setup(cmd.Process.Pid); err != nil {
-		_ = networkManager.Destroy()
-		_ = cgroupManager.Destroy()
-		abortChild(cmd, childSyncWrite)
-		must(err)
-	}
-
-	if err := releaseChild(childSyncWrite); err != nil {
-		_ = networkManager.Destroy()
-		_ = cgroupManager.Destroy()
-		abortChild(cmd, nil)
-		must(err)
-	}
-
-	// Wait reports non-zero container exits as errors; translate them after cleanup.
-	waitErr := cmd.Wait()
-	must(networkManager.Destroy())
-	must(cgroupManager.Destroy())
-	exitWithChildStatus(waitErr)
+	return cmd, cleanup, nil
 }
 
 // child waits for parent-side setup, then builds the container view and execs the command.
@@ -120,12 +106,11 @@ func child() {
 	must(waitForParentSync())
 	must(os.Unsetenv(childSyncEnv))
 
-	fmt.Printf("Running %v \n", os.Args[2:])
+	fmt.Printf("Running %v \n", os.Args[3:])
 
 	must(syscall.Sethostname([]byte("container")))
 	must(syscall.Mount("", "/", "", syscall.MS_PRIVATE|syscall.MS_REC, ""))
-	// TODO: pass rootfs through runtime config instead of hardcoding a local path.
-	must(syscall.Chroot("/home/vanillab/container/rootfs")) // must change as your own path
+	must(syscall.Chroot(os.Args[2]))
 	must(os.Chdir("/"))
 
 	must(syscall.Mount("proc", "/proc", "proc", 0, ""))
@@ -139,28 +124,28 @@ func child() {
 	}()
 
 	// Resolve PATH after chroot so lookup happens against the container rootfs.
-	command, err := exec.LookPath(os.Args[2])
+	command, err := exec.LookPath(os.Args[3])
 	must(err)
 
 	// TODO: add an optional init wrapper if mini-container should reap or forward signals itself.
 	// Exec replaces this bootstrap process, making the requested command PID 1.
-	must(syscall.Exec(command, os.Args[2:], os.Environ()))
+	must(syscall.Exec(command, os.Args[3:], os.Environ()))
 }
 
 // applyCgroup attaches the container process to the pids-limited cgroup.
-func applyCgroup(pid int) (cgroups.Manager, error) {
-	// TODO: move cgroup name and resource limits into runtime config.
+func applyCgroup(id string, pid int) (cgroups.Manager, error) {
+	// TODO: move resource limits into runtime config.
 	pidsLimit := int64(20)
-	cgroupManager, err := cgroups.NewManager("mini-container/jb")
+	cgroupManager, err := cgroups.NewManager("mini-container/" + id)
 	if err != nil {
 		return nil, err
 	}
 
 	if err := cgroupManager.Set(cgroups.ResourceConfig{PidsLimit: &pidsLimit}); err != nil {
-		return nil, err
+		return cgroupManager, err
 	}
 	if err := cgroupManager.Apply(pid); err != nil {
-		return nil, err
+		return cgroupManager, err
 	}
 
 	return cgroupManager, nil
@@ -177,11 +162,10 @@ func newNetworkManager() (*network.Manager, error) {
 	return network.NewManager(network.Config{
 		Enabled:           true,
 		BridgeName:        "mini0",
-		ContainerAddress:  "10.0.0.2/24",
 		GatewayAddress:    "10.0.0.1/24",
 		EnableNAT:         true,
 		OutboundInterface: outboundInterface,
-	}), nil
+	})
 }
 
 // hostDefaultOutboundInterface finds the host interface used by the default IPv4 route.
@@ -282,24 +266,19 @@ func must(err error) {
 	}
 }
 
-// exitWithChildStatus mirrors the container process status instead of panicking on normal exits.
-func exitWithChildStatus(err error) {
+// childExitCode preserves the application's exit status across the CLI connection.
+func childExitCode(err error) int {
 	if err == nil {
-		return
+		return 0
 	}
-
-	exitErr, ok := err.(*exec.ExitError)
-	if !ok {
-		must(err)
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if code := exitErr.ExitCode(); code >= 0 {
+			return code
+		}
+		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+			return 128 + int(status.Signal())
+		}
 	}
-
-	if code := exitErr.ExitCode(); code >= 0 {
-		os.Exit(code)
-	}
-
-	if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-		os.Exit(128 + int(status.Signal()))
-	}
-
-	must(err)
+	return 1
 }

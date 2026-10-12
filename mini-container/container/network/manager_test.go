@@ -2,495 +2,202 @@ package network
 
 import (
 	"errors"
+	"fmt"
+	"reflect"
 	"testing"
 )
 
-func TestNewManagerStoresConfig(t *testing.T) {
-	config := Config{
-		Enabled:           true,
-		BridgeName:        "mini0",
-		ContainerAddress:  "10.0.0.2/24",
-		GatewayAddress:    "10.0.0.1/24",
-		EnableNAT:         true,
-		OutboundInterface: "eth0",
-	}
-
-	manager := NewManager(config)
-	if manager == nil {
-		t.Fatal("expected manager, got nil")
-	}
-
-	if manager.config != config {
-		t.Fatalf("expected config %+v, got %+v", config, manager.config)
-	}
-}
-
-func TestManagerSetupReturnsNilAfterBridgeAndContainerSetup(t *testing.T) {
-	manager := NewManager(validConfig())
-	manager.setupBridge = func(name string, gatewayAddress string) error {
-		return nil
-	}
-	manager.connectContainer = func(bridgeName string, containerPID int, containerAddress string, gatewayAddress string) error {
-		return nil
-	}
-
-	if err := manager.Setup(1234); err != nil {
-		t.Fatalf("expected nil error, got %v", err)
-	}
-}
-
-func TestManagerSetupSkipsDisabledNetwork(t *testing.T) {
-	manager := NewManager(Config{})
-	manager.setupBridge = func(name string, gatewayAddress string) error {
-		t.Fatal("expected setupBridge not to be called")
-		return nil
-	}
-	manager.connectContainer = func(bridgeName string, containerPID int, containerAddress string, gatewayAddress string) error {
-		t.Fatal("expected connectContainer not to be called")
-		return nil
-	}
-	manager.setupNAT = func(config NATConfig) error {
-		t.Fatal("expected setupNAT not to be called")
-		return nil
-	}
-
-	if err := manager.Setup(1234); err != nil {
-		t.Fatalf("expected nil error for disabled network, got %v", err)
-	}
-}
-
-func TestManagerDestroySkipsDisabledNetwork(t *testing.T) {
-	manager := NewManager(Config{})
-	manager.destroyBridge = func(name string) error {
-		t.Fatal("expected destroyBridge not to be called")
-		return nil
-	}
-	manager.destroyNAT = func(config NATConfig) error {
-		t.Fatal("expected destroyNAT not to be called")
-		return nil
-	}
-
-	if err := manager.Destroy(); err != nil {
-		t.Fatalf("expected nil error for disabled network, got %v", err)
-	}
-}
-
-func TestManagerSetupCallsBridgeSetupWithConfig(t *testing.T) {
-	manager := NewManager(validConfig())
-	called := false
-
-	manager.setupBridge = func(name string, gatewayAddress string) error {
-		called = true
-
-		if name != "mini0" {
-			t.Fatalf("expected bridge name mini0, got %s", name)
-		}
-		if gatewayAddress != "10.0.0.1/24" {
-			t.Fatalf("expected gateway address 10.0.0.1/24, got %s", gatewayAddress)
-		}
-
-		return nil
-	}
-	manager.connectContainer = func(bridgeName string, containerPID int, containerAddress string, gatewayAddress string) error {
-		return nil
-	}
-
-	if err := manager.Setup(1234); err != nil {
-		t.Fatalf("expected nil error after bridge setup, got %v", err)
-	}
-	if !called {
-		t.Fatal("expected setupBridge to be called")
-	}
-}
-
-func TestManagerSetupCallsConnectContainerWithConfig(t *testing.T) {
-	manager := NewManager(validConfig())
-	calls := []string{}
-
-	manager.setupBridge = func(name string, gatewayAddress string) error {
-		calls = append(calls, "bridge")
-		return nil
-	}
-	manager.connectContainer = func(bridgeName string, containerPID int, containerAddress string, gatewayAddress string) error {
-		calls = append(calls, "connect")
-
-		if bridgeName != "mini0" {
-			t.Fatalf("expected bridge name mini0, got %s", bridgeName)
-		}
-		if containerPID != 1234 {
-			t.Fatalf("expected container pid 1234, got %d", containerPID)
-		}
-		if containerAddress != "10.0.0.2/24" {
-			t.Fatalf("expected container address 10.0.0.2/24, got %s", containerAddress)
-		}
-		if gatewayAddress != "10.0.0.1/24" {
-			t.Fatalf("expected gateway address 10.0.0.1/24, got %s", gatewayAddress)
-		}
-
-		return nil
-	}
-
-	if err := manager.Setup(1234); err != nil {
-		t.Fatalf("expected nil error after container connect, got %v", err)
-	}
-	if len(calls) != 2 || calls[0] != "bridge" || calls[1] != "connect" {
-		t.Fatalf("expected bridge then connect calls, got %v", calls)
-	}
-}
-
-func TestManagerSetupCallsNATWithContainerSubnet(t *testing.T) {
-	config := validConfig()
-	config.EnableNAT = true
-	config.OutboundInterface = "eth0"
-	manager := NewManager(config)
-
-	manager.setupBridge = func(name string, gatewayAddress string) error {
-		return nil
-	}
-	manager.connectContainer = func(bridgeName string, containerPID int, containerAddress string, gatewayAddress string) error {
-		return nil
-	}
-	manager.setupNAT = func(config NATConfig) error {
-		if config.SourceCIDR != "10.0.0.0/24" {
-			t.Fatalf("expected source CIDR 10.0.0.0/24, got %s", config.SourceCIDR)
-		}
-		if config.OutboundInterface != "eth0" {
-			t.Fatalf("expected outbound interface eth0, got %s", config.OutboundInterface)
-		}
-
-		return nil
-	}
-
-	if err := manager.Setup(1234); err != nil {
-		t.Fatalf("expected nil error for NAT setup, got %v", err)
-	}
-}
-
-func TestManagerSetupReturnsNATError(t *testing.T) {
-	natErr := errors.New("nat setup failed")
-	config := validConfig()
-	config.EnableNAT = true
-	config.OutboundInterface = "eth0"
-	manager := NewManager(config)
-
-	manager.setupBridge = func(name string, gatewayAddress string) error {
-		return nil
-	}
-	manager.connectContainer = func(bridgeName string, containerPID int, containerAddress string, gatewayAddress string) error {
-		return nil
-	}
-	manager.setupNAT = func(config NATConfig) error {
-		return natErr
-	}
-	manager.destroyNAT = func(config NATConfig) error {
-		return nil
-	}
-	manager.destroyBridge = func(name string) error {
-		return nil
-	}
-
-	err := manager.Setup(1234)
-	if !errors.Is(err, natErr) {
-		t.Fatalf("expected NAT setup error, got %v", err)
-	}
-}
-
-func TestManagerSetupRollsBackBridgeWhenConnectFails(t *testing.T) {
-	connectErr := errors.New("connect failed")
-	manager := NewManager(validConfig())
-	var calls []string
-
-	manager.setupBridge = func(name string, gatewayAddress string) error {
-		calls = append(calls, "bridge")
-		return nil
-	}
-	manager.connectContainer = func(bridgeName string, containerPID int, containerAddress string, gatewayAddress string) error {
-		calls = append(calls, "connect")
-		return connectErr
-	}
-	manager.destroyBridge = func(name string) error {
-		calls = append(calls, "destroy-bridge")
-		return nil
-	}
-
-	err := manager.Setup(1234)
-	if !errors.Is(err, connectErr) {
-		t.Fatalf("expected connect error, got %v", err)
-	}
-
-	want := []string{"bridge", "connect", "destroy-bridge"}
-	if !equalStrings(calls, want) {
-		t.Fatalf("expected calls %v, got %v", want, calls)
-	}
-}
-
-func TestManagerSetupRollsBackNATAndBridgeWhenNATFails(t *testing.T) {
-	natErr := errors.New("nat setup failed")
-	config := validConfig()
-	config.EnableNAT = true
-	config.OutboundInterface = "eth0"
-	manager := NewManager(config)
-	var calls []string
-
-	manager.setupBridge = func(name string, gatewayAddress string) error {
-		calls = append(calls, "bridge")
-		return nil
-	}
-	manager.connectContainer = func(bridgeName string, containerPID int, containerAddress string, gatewayAddress string) error {
-		calls = append(calls, "connect")
-		return nil
-	}
-	manager.setupNAT = func(config NATConfig) error {
-		calls = append(calls, "nat")
-		return natErr
-	}
-	manager.destroyNAT = func(config NATConfig) error {
-		calls = append(calls, "destroy-nat")
-		return nil
-	}
-	manager.destroyBridge = func(name string) error {
-		calls = append(calls, "destroy-bridge")
-		return nil
-	}
-
-	err := manager.Setup(1234)
-	if !errors.Is(err, natErr) {
-		t.Fatalf("expected NAT setup error, got %v", err)
-	}
-
-	want := []string{"bridge", "connect", "nat", "destroy-nat", "destroy-bridge"}
-	if !equalStrings(calls, want) {
-		t.Fatalf("expected calls %v, got %v", want, calls)
-	}
-}
-
-func TestManagerSetupReturnsBridgeSetupError(t *testing.T) {
-	bridgeErr := errors.New("bridge setup failed")
-	manager := NewManager(validConfig())
-	manager.setupBridge = func(name string, gatewayAddress string) error {
-		return bridgeErr
-	}
-	manager.connectContainer = func(bridgeName string, containerPID int, containerAddress string, gatewayAddress string) error {
-		t.Fatal("expected connectContainer not to be called")
-		return nil
-	}
-
-	err := manager.Setup(1234)
-	if !errors.Is(err, bridgeErr) {
-		t.Fatalf("expected bridge setup error, got %v", err)
-	}
-}
-
-func TestManagerSetupRejectsInvalidConfig(t *testing.T) {
-	manager := NewManager(Config{
-		Enabled:        true,
-		GatewayAddress: "10.0.0.1/24",
-	})
-	manager.setupBridge = func(name string, gatewayAddress string) error {
-		t.Fatal("expected setupBridge not to be called")
-		return nil
-	}
-	manager.connectContainer = func(bridgeName string, containerPID int, containerAddress string, gatewayAddress string) error {
-		t.Fatal("expected connectContainer not to be called")
-		return nil
-	}
-
-	err := manager.Setup(1234)
-	if err == nil {
-		t.Fatal("expected error for invalid config")
-	}
-}
-
-func TestManagerDestroyCallsNATThenBridge(t *testing.T) {
-	config := validConfig()
-	config.EnableNAT = true
-	config.OutboundInterface = "eth0"
-	manager := NewManager(config)
-	calls := []string{}
-
-	manager.destroyNAT = func(config NATConfig) error {
-		calls = append(calls, "nat")
-		if config.SourceCIDR != "10.0.0.0/24" {
-			t.Fatalf("expected source CIDR 10.0.0.0/24, got %s", config.SourceCIDR)
-		}
-		if config.OutboundInterface != "eth0" {
-			t.Fatalf("expected outbound interface eth0, got %s", config.OutboundInterface)
-		}
-		return nil
-	}
-	manager.destroyBridge = func(name string) error {
-		calls = append(calls, "bridge")
-		if name != "mini0" {
-			t.Fatalf("expected bridge name mini0, got %s", name)
-		}
-		return nil
-	}
-
-	if err := manager.Destroy(); err != nil {
-		t.Fatalf("expected nil error for destroy, got %v", err)
-	}
-	if len(calls) != 2 || calls[0] != "nat" || calls[1] != "bridge" {
-		t.Fatalf("expected nat then bridge calls, got %v", calls)
-	}
-}
-
-func TestManagerDestroySkipsNATWhenDisabled(t *testing.T) {
-	manager := NewManager(validConfig())
-	called := false
-
-	manager.destroyNAT = func(config NATConfig) error {
-		t.Fatal("expected destroyNAT not to be called")
-		return nil
-	}
-	manager.destroyBridge = func(name string) error {
-		called = true
-		return nil
-	}
-
-	if err := manager.Destroy(); err != nil {
-		t.Fatalf("expected nil error for destroy, got %v", err)
-	}
-	if !called {
-		t.Fatal("expected destroyBridge to be called")
-	}
-}
-
-func TestManagerDestroyReturnsCleanupErrors(t *testing.T) {
-	natErr := errors.New("nat destroy failed")
-	bridgeErr := errors.New("bridge destroy failed")
-	config := validConfig()
-	config.EnableNAT = true
-	config.OutboundInterface = "eth0"
-	manager := NewManager(config)
-
-	manager.destroyNAT = func(config NATConfig) error {
-		return natErr
-	}
-	manager.destroyBridge = func(name string) error {
-		return bridgeErr
-	}
-
-	err := manager.Destroy()
-	if !errors.Is(err, natErr) {
-		t.Fatalf("expected NAT destroy error, got %v", err)
-	}
-	if !errors.Is(err, bridgeErr) {
-		t.Fatalf("expected bridge destroy error, got %v", err)
-	}
-}
-
-func TestManagerValidateSetupConfigSkipsDisabledNetwork(t *testing.T) {
-	manager := NewManager(Config{})
-
-	if err := manager.validateSetupConfig(); err != nil {
-		t.Fatalf("expected nil error for disabled network, got %v", err)
-	}
-}
-
-func TestManagerValidateSetupConfigRejectsEmptyBridgeName(t *testing.T) {
-	manager := NewManager(Config{
-		Enabled:          true,
-		BridgeName:       "",
-		ContainerAddress: "10.0.0.2/24",
-		GatewayAddress:   "10.0.0.1/24",
-	})
-
-	if err := manager.validateSetupConfig(); err == nil {
-		t.Fatal("expected error for empty bridge name")
-	}
-}
-
-func TestManagerValidateSetupConfigRejectsInvalidGatewayAddress(t *testing.T) {
-	for _, gatewayAddress := range []string{"", "10.0.0.1", "not-a-cidr"} {
-		t.Run(gatewayAddress, func(t *testing.T) {
-			manager := NewManager(Config{
-				Enabled:          true,
-				BridgeName:       "mini0",
-				ContainerAddress: "10.0.0.2/24",
-				GatewayAddress:   gatewayAddress,
-			})
-
-			if err := manager.validateSetupConfig(); err == nil {
-				t.Fatal("expected error for invalid gateway address")
-			}
-		})
-	}
-}
-
-func TestManagerValidateSetupConfigRejectsInvalidContainerAddress(t *testing.T) {
-	for _, containerAddress := range []string{"", "10.0.0.2", "not-a-cidr"} {
-		t.Run(containerAddress, func(t *testing.T) {
-			manager := NewManager(Config{
-				Enabled:          true,
-				BridgeName:       "mini0",
-				ContainerAddress: containerAddress,
-				GatewayAddress:   "10.0.0.1/24",
-			})
-
-			if err := manager.validateSetupConfig(); err == nil {
-				t.Fatal("expected error for invalid container address")
-			}
-		})
-	}
-}
-
-func TestManagerValidateSetupConfigAcceptsRequiredCIDRs(t *testing.T) {
-	manager := NewManager(Config{
-		Enabled:          true,
-		BridgeName:       "mini0",
-		ContainerAddress: "10.0.0.2/24",
-		GatewayAddress:   "10.0.0.1/24",
-	})
-
-	if err := manager.validateSetupConfig(); err != nil {
-		t.Fatalf("expected nil error, got %v", err)
-	}
-}
-
-func TestManagerValidateSetupConfigRejectsMissingOutboundInterfaceWhenNATEnabled(t *testing.T) {
-	manager := NewManager(Config{
-		Enabled:          true,
-		BridgeName:       "mini0",
-		ContainerAddress: "10.0.0.2/24",
-		GatewayAddress:   "10.0.0.1/24",
-		EnableNAT:        true,
-	})
-
-	if err := manager.validateSetupConfig(); err == nil {
-		t.Fatal("expected error for missing outbound interface")
-	}
-}
-
-func TestContainerSubnetCIDRDerivesNetworkCIDR(t *testing.T) {
-	got, err := containerSubnetCIDR("10.0.0.2/24")
+func testManager(t *testing.T) (*Manager, *[]string) {
+	t.Helper()
+	m, err := NewManager(Config{Enabled: true, BridgeName: "mini0", GatewayAddress: "10.0.0.1/24", EnableNAT: true, OutboundInterface: "eth0"})
 	if err != nil {
-		t.Fatalf("expected nil error, got %v", err)
+		t.Fatal(err)
 	}
+	calls := []string{}
+	m.setupBridge = func(name, gateway string) error {
+		if name != "mini0" || gateway != "10.0.0.1/24" {
+			t.Fatalf("unexpected bridge %s %s", name, gateway)
+		}
+		calls = append(calls, "bridge")
+		return nil
+	}
+	m.setupNAT = func(c NATConfig) error {
+		if c.SourceCIDR != "10.0.0.0/24" || c.OutboundInterface != "eth0" {
+			t.Fatalf("unexpected NAT %+v", c)
+		}
+		calls = append(calls, "nat")
+		return nil
+	}
+	m.destroyBridge = func(string) error { calls = append(calls, "delete-bridge"); return nil }
+	m.destroyNAT = func(NATConfig) error { calls = append(calls, "delete-nat"); return nil }
+	m.connectContainer = func(_ string, pid int, address, _ string) (func() error, error) {
+		calls = append(calls, fmt.Sprintf("attach-%d", pid))
+		return func() error { calls = append(calls, fmt.Sprintf("detach-%d", pid)); return nil }, nil
+	}
+	return m, &calls
+}
 
-	if got != "10.0.0.0/24" {
-		t.Fatalf("expected subnet 10.0.0.0/24, got %s", got)
+func TestConnectionsShareNetworkButHaveSeparateAddresses(t *testing.T) {
+	m, calls := testManager(t)
+	a, err := m.Attach("a", 101)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := m.Attach("b", 102)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != "10.0.0.2/24" || b != "10.0.0.3/24" {
+		t.Fatalf("addresses: %s %s", a, b)
+	}
+	if err := m.Destroy(); err == nil {
+		t.Fatal("deleted an active network")
+	}
+	if err := m.Detach("a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Detach("a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.connections["b"]; !ok {
+		t.Fatal("other connection lost")
+	}
+	if err := m.Detach("b"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"bridge", "nat", "attach-101", "attach-102", "detach-101", "detach-102"}
+	if !reflect.DeepEqual(*calls, want) {
+		t.Fatalf("unexpected lifecycle: %v", *calls)
+	}
+	if err := m.Destroy(); err != nil {
+		t.Fatal(err)
+	}
+	want = append(want, "delete-nat", "delete-bridge")
+	if !reflect.DeepEqual(*calls, want) {
+		t.Fatalf("explicit deletion: %v", *calls)
+	}
+	if err := m.Setup(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual((*calls)[len(want):], []string{"bridge", "nat"}) {
+		t.Fatal("network not recreated")
 	}
 }
 
-func validConfig() Config {
-	return Config{
-		Enabled:          true,
-		BridgeName:       "mini0",
-		ContainerAddress: "10.0.0.2/24",
-		GatewayAddress:   "10.0.0.1/24",
+func TestAttachFailureUsesConnectionCleanupOnly(t *testing.T) {
+	for _, created := range []bool{false, true} {
+		t.Run(fmt.Sprint(created), func(t *testing.T) {
+			m, calls := testManager(t)
+			if _, err := m.Attach("existing", 101); err != nil {
+				t.Fatal(err)
+			}
+			setupErr := errors.New("setup failed")
+			m.connectContainer = func(string, int, string, string) (func() error, error) {
+				if !created {
+					return nil, setupErr
+				}
+				return func() error { *calls = append(*calls, "partial-cleanup"); return nil }, setupErr
+			}
+			if _, err := m.Attach("failed", 102); !errors.Is(err, setupErr) {
+				t.Fatalf("got %v", err)
+			}
+			if len(m.connections) != 1 {
+				t.Fatalf("connections: %v", m.connections)
+			}
+			ip, err := m.allocator.Allocate("next")
+			if err != nil || ip != "10.0.0.3/24" {
+				t.Fatalf("lease not released: %s %v", ip, err)
+			}
+			want := []string{"bridge", "nat", "attach-101"}
+			if created {
+				want = append(want, "partial-cleanup")
+			}
+			if !reflect.DeepEqual(*calls, want) {
+				t.Fatalf("unexpected cleanup: %v", *calls)
+			}
+		})
 	}
 }
 
-func equalStrings(got []string, want []string) bool {
-	if len(got) != len(want) {
-		return false
+func TestCleanupFailureKeepsLeaseUntilRetry(t *testing.T) {
+	m, _ := testManager(t)
+	setupErr, cleanupErr := errors.New("setup"), errors.New("cleanup")
+	fail := true
+	m.connectContainer = func(string, int, string, string) (func() error, error) {
+		return func() error {
+			if fail {
+				return cleanupErr
+			}
+			return nil
+		}, setupErr
 	}
+	_, err := m.Attach("a", 101)
+	if !errors.Is(err, setupErr) || !errors.Is(err, cleanupErr) {
+		t.Fatalf("lost errors: %v", err)
+	}
+	if err := m.Destroy(); err == nil {
+		t.Fatal("deleted network with incomplete cleanup")
+	}
+	ip, err := m.allocator.Allocate("b")
+	if err != nil || ip != "10.0.0.3/24" {
+		t.Fatalf("reused active lease: %s %v", ip, err)
+	}
+	fail = false
+	if err := m.Detach("a"); err != nil {
+		t.Fatal(err)
+	}
+	ip, err = m.allocator.Allocate("c")
+	if err != nil || ip != "10.0.0.2/24" {
+		t.Fatalf("lease not released: %s %v", ip, err)
+	}
+}
 
-	for i := range got {
-		if got[i] != want[i] {
-			return false
+func TestSetupFailurePreservesSharedResources(t *testing.T) {
+	m, calls := testManager(t)
+	setupErr := errors.New("nat")
+	m.setupNAT = func(NATConfig) error { return setupErr }
+	if _, err := m.Attach("a", 101); !errors.Is(err, setupErr) {
+		t.Fatalf("got %v", err)
+	}
+	if !reflect.DeepEqual(*calls, []string{"bridge"}) {
+		t.Fatalf("unexpected teardown: %v", *calls)
+	}
+}
+
+func TestManagerValidationAndDisabledNetwork(t *testing.T) {
+	for _, config := range []Config{
+		{Enabled: true, GatewayAddress: "10.0.0.1/24"},
+		{Enabled: true, BridgeName: "mini0", GatewayAddress: "bad"},
+		{Enabled: true, BridgeName: "mini0", GatewayAddress: "10.0.0.1/24", EnableNAT: true},
+	} {
+		if _, err := NewManager(config); err == nil {
+			t.Fatalf("accepted %+v", config)
 		}
 	}
+	m, err := NewManager(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Attach("a", 101); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Detach("a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Destroy(); err != nil {
+		t.Fatal(err)
+	}
+}
 
-	return true
+func TestDuplicateAttachmentDoesNotChangeExistingConnection(t *testing.T) {
+	m, calls := testManager(t)
+	if _, err := m.Attach("a", 101); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Attach("a", 102); err == nil {
+		t.Fatal("duplicate attachment accepted")
+	}
+	if len(*calls) != 3 {
+		t.Fatalf("duplicate setup: %v", *calls)
+	}
 }

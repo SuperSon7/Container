@@ -19,8 +19,6 @@ func SetupBridge(name string, gatewayAddress string) error {
 		return err
 	}
 
-	// TODO: For multiple containers, keep bridge/gateway setup network-scoped
-	// and allocate container IPs separately.
 	if err := ensureBridgeAddress(br, addr); err != nil {
 		return fmt.Errorf("assign gateway address %s to bridge %s: %w", gatewayAddress, name, err)
 	}
@@ -35,8 +33,6 @@ func SetupBridge(name string, gatewayAddress string) error {
 
 // DestroyBridge deletes the host-side bridge when it exists.
 func DestroyBridge(name string) error {
-	// TODO: When multiple containers share a bridge, track network ownership
-	// instead of deleting the shared bridge after each container exits.
 	br, err := netlink.LinkByName(name)
 	if isLinkNotFound(err) {
 		return nil
